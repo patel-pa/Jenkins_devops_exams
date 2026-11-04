@@ -1,0 +1,123 @@
+{{- range $name, $svc := .Values.services }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-db-data
+  labels:
+    app: {{ $name }}-db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ $.Values.dbStorage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-db
+  labels:
+    app: {{ $name }}-db
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ $name }}-db
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}-db
+    spec:
+      containers:
+        - name: postgres
+          image: {{ $.Values.postgresImage }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ $svc.db.name | quote }}
+            - name: POSTGRES_USER
+              value: {{ $svc.db.user | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ $svc.db.password | quote }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ $svc.db.user | quote }}, "-d", {{ $svc.db.name | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $name }}-db-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-db
+spec:
+  selector:
+    app: {{ $name }}-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-service
+  labels:
+    app: {{ $name }}-service
+spec:
+  replicas: {{ $svc.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ $name }}-service
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}-service
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ["sh", "-c", "until nc -z -w 2 {{ $name }}-db 5432; do echo waiting for {{ $name }}-db; sleep 2; done"]
+      containers:
+        - name: {{ $name }}-service
+          image: "{{ $svc.image }}:{{ $.Values.imageTag }}"
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URI
+              value: "postgresql://{{ $svc.db.user }}:{{ $svc.db.password }}@{{ $name }}-db/{{ $svc.db.name }}"
+            {{- with $svc.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-service
+spec:
+  selector:
+    app: {{ $name }}-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+{{- end }}
