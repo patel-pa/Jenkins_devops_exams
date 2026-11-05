@@ -3,14 +3,24 @@
 // prod is deployed only from master, after a manual approval.
 
 def deployTo(String namespace, String nodePort) {
-  sh """
-    helm upgrade --install fastapiapp charts \
-      --namespace ${namespace} \
-      --set imageTag=${env.IMAGE_TAG} \
-      --set nginx.nodePort=${nodePort} \
-      --wait --timeout 5m
-    kubectl get pods -n ${namespace}
-  """
+  // If another build is deploying the same release, wait and retry
+  retry(5) {
+    sh """
+      for i in \$(seq 1 30); do
+        status=\$(helm status fastapiapp -n ${namespace} -o json 2>/dev/null | grep -o '"status":"[a-z-]*"' | head -1 | cut -d'"' -f4)
+        case "\$status" in
+          pending-*) echo "Release busy (\$status), waiting..."; sleep 10 ;;
+          *) break ;;
+        esac
+      done
+      helm upgrade --install fastapiapp charts \
+        --namespace ${namespace} \
+        --set imageTag=${env.IMAGE_TAG} \
+        --set nginx.nodePort=${nodePort} \
+        --wait --timeout 5m
+      kubectl get pods -n ${namespace}
+    """
+  }
 }
 
 def smokeTest(String namespace, String nodePort) {
